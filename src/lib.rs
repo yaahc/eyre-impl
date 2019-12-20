@@ -97,9 +97,9 @@ impl<'a, D> Indented<'a, D> {
     }
 }
 
-impl<T> fmt::Write for Indented<'_, T>
+impl<T> Write for Indented<'_, T>
 where
-    T: fmt::Write,
+    T: Write,
 {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for (ind, line) in s.split('\n').enumerate() {
