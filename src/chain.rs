@@ -2,6 +2,7 @@ use self::ChainState::*;
 
 use std::vec;
 
+/// An iterator over an `Error` and its sources.
 pub struct Chain<'a> {
     state: ChainState<'a>,
 }
