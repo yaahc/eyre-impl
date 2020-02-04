@@ -2,12 +2,12 @@ use self::ChainState::*;
 
 use std::vec;
 
-pub(crate) struct Chain<'a> {
+pub struct Chain<'a> {
     state: ChainState<'a>,
 }
 
 #[derive(Clone)]
-pub(crate) enum ChainState<'a> {
+pub enum ChainState<'a> {
     Linked {
         next: Option<&'a (dyn std::error::Error + 'static)>,
     },

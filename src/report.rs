@@ -1,134 +1,91 @@
 use crate::chain::Chain;
-use crate::context::{ContextObj, ContextObject};
 #[cfg(backtrace)]
 use std::backtrace::Backtrace;
 use std::fmt;
-use std::marker::PhantomData;
-use strategy::ErrorInfo;
 
-pub struct RootCauseFirst<C>(PhantomData<C>);
-pub struct RootCauseLast<C>(PhantomData<C>);
-
-pub struct ErrReport<C = BothTrace, S = RootCauseFirst<C>>(pub(crate) Box<ReportImpl<C, S>>)
-where
-    C: Default + fmt::Display,
-    S: strategy::ErrorFormatter<C>;
-
-impl<C, S> ErrReport<C, S>
-where
-    C: Default + fmt::Display,
-    S: strategy::ErrorFormatter<C>,
-{
-    pub fn note(&mut self, context: impl ContextObj) {
-        self.0.context.push(ContextObject::Note(Box::new(context)));
-    }
-
-    pub fn warn(&mut self, context: impl ContextObj) {
-        self.0.context.push(ContextObject::Warn(Box::new(context)));
-    }
+pub trait ErrorFormatter {
+    fn fmt_error<'a>(
+        &self,
+        error: &'a (dyn std::error::Error + 'static),
+        f: &mut fmt::Formatter,
+    ) -> fmt::Result;
 }
 
-impl<C, S> fmt::Debug for ErrReport<C, S>
-where
-    C: Default + fmt::Display,
-    S: strategy::ErrorFormatter<C>,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.debug(f)
-    }
+pub trait ErrorContext<CO> {
+    fn push(&mut self, context: CO);
 }
 
-impl<C, S> fmt::Display for ErrReport<C, S>
+pub struct ErrorReporter<E, C>
 where
-    C: Default + fmt::Display,
-    S: strategy::ErrorFormatter<C>,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.display(f)
-    }
-}
-
-impl<E, C, S> From<E> for ErrReport<C, S>
-where
-    C: Default + fmt::Display,
-    S: strategy::ErrorFormatter<C>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    fn from(err: E) -> Self {
-        ErrReport(Box::new(ReportImpl {
-            error: Box::new(err),
-            contextt: C::default(),
-            context: Vec::new(),
-            phantom: PhantomData,
-        }))
-    }
+    error: E,
+    pub context: C,
 }
 
-mod strategy;
-
-pub struct ReportImpl<C, S> {
-    error: Box<dyn std::error::Error + Send + Sync + 'static>,
-    pub(crate) contextt: C,
-    pub(crate) context: Vec<ContextObject>,
-    phantom: PhantomData<S>,
-}
-
-pub struct BothTrace {
-    #[cfg(backtrace)]
-    backtrace: Backtrace,
-    pub(crate) span_backtrace: tracing_error::SpanTrace,
-}
-
-impl Default for BothTrace {
-    fn default() -> Self {
+impl<C, E> From<E> for ErrorReporter<E, C>
+where
+    C: Default,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn from(error: E) -> Self {
         Self {
-            #[cfg(backtrace)]
-            backtrace: std::backtrace::Backtrace::capture(),
-            span_backtrace: tracing_error::SpanTrace::capture(),
+            context: Default::default(),
+            error,
         }
     }
 }
 
-impl fmt::Display for BothTrace {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.span_backtrace)?;
+/// CO = ContextObject
+pub trait StdError<E, C, CO>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn ext_context(self, context: CO) -> ErrorReporter<E, C>;
+}
 
-        #[cfg(backtrace)]
-        {
-            use std::backtrace::BacktraceStatus;
-
-            let backtrace = &self.backtrace;
-            if let BacktraceStatus::Captured = backtrace.status() {
-                let mut backtrace = backtrace.to_string();
-                if backtrace.starts_with("stack backtrace:") {
-                    // Capitalize to match "Caused by:"
-                    backtrace.replace_range(0..7, "Stack B");
-                }
-                backtrace.truncate(backtrace.trim_end().len());
-                write!(f, "\n\n{}", backtrace)?;
-            }
-        }
-
-        Ok(())
+impl<E, C, CO> StdError<E, C, CO> for E
+where
+    C: Default + ErrorContext<CO>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn ext_context(self, context: CO) -> ErrorReporter<E, C> {
+        let mut error = ErrorReporter::<E, C>::from(self);
+        error.context.push(context);
+        error
     }
 }
 
-impl<C, S> ReportImpl<C, S> {
+impl<C, CO, E> StdError<E, C, CO> for ErrorReporter<E, C>
+where
+    E: std::error::Error + Send + Sync + 'static,
+    C: ErrorContext<CO>,
+{
+    fn ext_context(mut self, context: CO) -> ErrorReporter<E, C> {
+        self.context.push(context);
+        self
+    }
+}
+
+impl<E, C> ErrorReporter<E, C>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     fn error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-        self.error.as_ref()
+        &self.error
     }
 
-    pub(crate) fn chain(&self) -> Chain {
+    pub fn chain(&self) -> Chain {
         Chain::new(self.error())
     }
 }
 
-impl<C, S> ReportImpl<C, S>
+impl<E, C> fmt::Display for ErrorReporter<E, C>
 where
-    C: Default + fmt::Display,
-    S: strategy::ErrorFormatter<C>,
+    E: std::error::Error + Send + Sync + 'static,
+    C: Default + ErrorFormatter,
 {
-    pub(crate) fn display(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.error())?;
 
         if f.alternate() {
@@ -139,20 +96,128 @@ where
 
         Ok(())
     }
+}
 
-    pub(crate) fn debug(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl<E, C> fmt::Debug for ErrorReporter<E, C>
+where
+    E: std::error::Error + Send + Sync + 'static,
+    C: Default + ErrorFormatter,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let error = self.error();
 
         if f.alternate() {
             return fmt::Debug::fmt(error, f);
         }
 
-        S::fmt_error(
-            ErrorInfo {
-                error,
-                context: &self.contextt,
-            },
-            f,
-        )
+        self.context.fmt_error(error, f)
+    }
+}
+
+pub struct Indented<'a, D> {
+    inner: &'a mut D,
+    ind: Option<usize>,
+    started: bool,
+}
+
+impl<'a, D> Indented<'a, D> {
+    pub fn numbered(inner: &'a mut D, ind: usize) -> Self {
+        Self {
+            inner,
+            ind: Some(ind),
+            started: false,
+        }
+    }
+}
+
+impl<T> fmt::Write for Indented<'_, T>
+where
+    T: fmt::Write,
+{
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for (ind, mut line) in s.split('\n').enumerate() {
+            if !self.started {
+                // trim first line to ensure it lines up with the number nicely
+                line = line.trim();
+                // Don't render the first line unless its actually got text on it
+                if line.is_empty() {
+                    continue;
+                }
+
+                self.started = true;
+                match self.ind {
+                    Some(ind) => self.inner.write_fmt(format_args!("{: >5}: ", ind))?,
+                    None => self.inner.write_fmt(format_args!("    "))?,
+                }
+            } else if ind > 0 {
+                self.inner.write_char('\n')?;
+                if self.ind.is_some() {
+                    self.inner.write_fmt(format_args!("       "))?;
+                } else {
+                    self.inner.write_fmt(format_args!("    "))?;
+                }
+            }
+
+            self.inner.write_fmt(format_args!("{}", line))?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write as _;
+
+    #[test]
+    fn one_digit() {
+        let input = "verify\nthis";
+        let expected = "    2: verify\n       this";
+        let mut output = String::new();
+
+        Indented {
+            inner: &mut output,
+            ind: Some(2),
+            started: false,
+        }
+        .write_str(input)
+        .unwrap();
+
+        assert_eq!(expected, output);
+    }
+
+    #[test]
+    fn two_digits() {
+        let input = "verify\nthis";
+        let expected = "   12: verify\n       this";
+        let mut output = String::new();
+
+        Indented {
+            inner: &mut output,
+            ind: Some(12),
+            started: false,
+        }
+        .write_str(input)
+        .unwrap();
+
+        assert_eq!(expected, output);
+    }
+
+    #[test]
+    fn no_digits() {
+        let input = "verify\nthis";
+        let expected = "    verify\n    this";
+        let mut output = String::new();
+
+        Indented {
+            inner: &mut output,
+            ind: None,
+            started: false,
+        }
+        .write_str(input)
+        .unwrap();
+
+        assert_eq!(expected, output);
     }
 }
