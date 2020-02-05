@@ -1,4 +1,4 @@
-The shape of errors to come
+The Shape of Errors to Come
 ===============
 
 [![Latest Version](https://img.shields.io/crates/v/eyre-impl.svg)](https://crates.io/crates/eyre-impl)
